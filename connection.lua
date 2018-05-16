@@ -100,7 +100,7 @@ function M:log(l,msg,...)
 	if string.match(msg,'%%') then
 		msg = string.format(msg,...)
 	else
-		local m = {}
+		local m = { msg }
 		for _,v in pairs({...}) do
 			table.insert(m, tostring(v))
 		end
@@ -237,7 +237,11 @@ function M:on_connect_io()
 				self.avail = self.avail + rd;
 				local avail = self.avail
 
-				self:on_read(rd == 0)
+				local status, err = pcall(self.on_read, self, rd == 0)
+				if not status then
+					self:log('E', 'on_read raised an error: ', err)
+					self:on_connect_reset(errno.EINVAL) -- errno.EINVAL = 22
+				end
 
 				local pkoft = avail - self.avail
 				-- print("avail ",avail, " -> ", self.avail, " pkoft = ", pkoft)
@@ -259,7 +263,6 @@ function M:on_connect_io()
 					oft = 0
 				end
 			elseif errno_is_transient[errno()] then
-				self = nil
 				s:readable()
 			else
 				-- print( errno.strerror( errno() ))
