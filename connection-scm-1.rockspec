@@ -3,7 +3,7 @@ version = 'scm-1'
 
 source  = {
     url    = 'git://github.com/moonlibs/connection.git';
-    branch = 'master';
+    branch = 'v1';
 }
 
 description = {
