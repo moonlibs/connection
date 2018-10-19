@@ -1,9 +1,3 @@
---[[
-***           This is legacy rockspec
-***   Please, for this version refer instead to
-***       rockspecs/connection-scm-1.rockspec
-]]
-
 package = 'connection'
 version = 'scm-1'
 
