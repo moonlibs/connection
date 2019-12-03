@@ -296,7 +296,6 @@ function M:on_connect_io()
 			local rd = C.read(fd, self.rbuf + oft, sz - oft)
 			-- local rd = C.read(s.socket.fd, self.rbuf + oft, 1)
 			if rd >= 0 then
-				print("read >>",rd)
 				self.avail = self.avail + rd;
 				local avail = self.avail
 				
