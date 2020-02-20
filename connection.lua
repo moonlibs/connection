@@ -296,7 +296,7 @@ function M:on_connect_io()
 		local s = weak.self.s
 		local fd = s:fd()
 		local oft = 0ULL
-		local sz  = ffi.sizeof(weak.self.rbuf)
+		local sz  = weak.self.maxbuf
 		while weak.self and gen == self._gen do
 			local self = weak.self
 			local rd = C.read(fd, self.rbuf + oft, sz - oft)
