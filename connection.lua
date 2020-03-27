@@ -23,6 +23,8 @@ ffi.cdef [[
 	void *memcpy(void *dest, const void *src, size_t n);
 	void *memmove(void *dest, const void *src, size_t n);
 	ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+	void *calloc(size_t nmemb, size_t size);
+	void free(void *ptr);
 ]]
 
 local C = ffi.C
@@ -101,7 +103,19 @@ function M:_init(host, port, opt)
 	
 	self.state = NOTCONNECTED
 	self.maxbuf = opt.maxbuf or 2*1024*1024
-	self.rbuf = ffi.new('char[?]', self.maxbuf)
+	self.rbuf = ffi.cast('char *', ffi.C.calloc(1, self.maxbuf))
+
+	do
+		local firstcall = true
+		ffi.gc(self.rbuf, function(ptr)
+			if not firstcall then
+				print("Called double __gc on:", tostring(ptr))
+				return
+			end
+			firstcall = false
+			ffi.C.free(ptr)
+		end)
+	end
 	self.avail = 0ULL
 	self._gen = 0
 
@@ -282,7 +296,7 @@ function M:on_connect_io()
 		local s = weak.self.s
 		local fd = s:fd()
 		local oft = 0ULL
-		local sz  = ffi.sizeof(weak.self.rbuf)
+		local sz  = weak.self.maxbuf
 		while weak.self and gen == self._gen do
 			local self = weak.self
 			local rd = C.read(fd, self.rbuf + oft, sz - oft)
