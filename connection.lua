@@ -277,7 +277,7 @@ function M:on_connect_io()
 	--print('----', weak.self.s)
 	
 	self.ww = fiber.create(function (weak, gen)
-		fiber.name(string.format("net.ww[%s:%s#%d]", weak.self.host, weak.self.port, gen))
+		fiber.name(string.format("net.ww[%s:%s#%d]", weak.self.host, weak.self.port, gen), { truncate = true })
 		local s = weak.self.s
 		local timeout = weak.self.timeout
 		while weak.self and gen == weak.self._gen do
@@ -292,7 +292,7 @@ function M:on_connect_io()
 	end, weak, self._gen)
 	
 	self.rw = fiber.create(function (weak, gen)
-		fiber.name(string.format("net.rw[%s:%s#%d]", weak.self.host, weak.self.port, gen))
+		fiber.name(string.format("net.rw[%s:%s#%d]", weak.self.host, weak.self.port, gen), { truncate = true })
 		local s = weak.self.s
 		local fd = s:fd()
 		local oft = 0ULL
