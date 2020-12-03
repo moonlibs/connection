@@ -82,9 +82,9 @@ function M:_init(host, port, opt)
 	self.host = host;
 	self.port = tonumber(port)
 	opt = opt or {}
-	
+
 	self.timeout = tonumber(opt.timeout) or 1/3
-	
+
 	if opt.reconnect ~= nil then
 		if opt.reconnect then
 			self._reconnect = tonumber(opt.reconnect)
@@ -94,13 +94,13 @@ function M:_init(host, port, opt)
 	else
 		self._reconnect = 1/3
 	end
-	
+
 	if opt.autoconnect ~= nil then
 		self._auto = opt.autoconnect
 	else
 		self._auto = true
 	end
-	
+
 	self.state = NOTCONNECTED
 	self.maxbuf = opt.maxbuf or 2*1024*1024
 	self.rbuf = ffi.cast('char *', ffi.C.calloc(1, self.maxbuf))
@@ -120,24 +120,18 @@ function M:_init(host, port, opt)
 	self._gen = 0
 
 	self.wsize = 32
-	local osz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 
 	self.wcur = 0
 	self.wstash = {}
 
 	self._flush = fiber.channel(0)
-	
+
 	self.connwait = fiber.channel(0)
-	
+
 	if self._auto then
 		self:connect()
 	end
-	--[[ -- FIXME
-	if opt.deadly or opt.deadly == nil then
-		box.reload:register(self)
-	end
-	]]
 end
 
 function M:log(l,msg,...)
@@ -190,7 +184,7 @@ function M:_cleanup(e)
 	self.avail  = 0ULL
 
 	self.lasterror = errno.strerror(e)
-	
+
 	while self.connwait:put(false, 0) do end
 end
 
@@ -201,11 +195,11 @@ function M:destroy()
 		self[k] = nil
 	end
 	setmetatable(self,{
-		__index = function(s,n)
+		__index = function(_,n)
 			log.error("access to `"..n.."' on destroyed con "..name)
 			fiber.cancel(fiber.self())
 		end,
-		__newindex = function(s,n)
+		__newindex = function(_,n)
 			log.error("access to `"..n.."' on destroyed con"..name)
 			fiber.cancel(fiber.self())
 		end
@@ -225,7 +219,7 @@ function M:on_connect_failed(e)
 			if self._reconnect then
 				self.state = RECONNECTING
 				if self.on_connfail then
-					fiber.create(function(self) fiber.name("net.cb") self:on_connfail(errno.strerror(e)) end,self)
+					fiber.create(function(cnn) fiber.name("net.cb") cnn:on_connfail(errno.strerror(e)) end,self)
 				end
 				fiber.sleep(self._reconnect)
 				if self.state == RECONNECTING then
@@ -234,7 +228,7 @@ function M:on_connect_failed(e)
 				end
 			else
 				-- self.state = NOTCONNECTED -- already
-				fiber.create(function(self) fiber.name("net.cb") self:on_disconnect(errno.strerror(e)) end,self)
+				fiber.create(function(cnn) fiber.name("net.cb") cnn:on_disconnect(errno.strerror(e)) end,self)
 			end
 		end
 	end
@@ -245,15 +239,15 @@ function M:on_connect_reset(e)
 	if self.state == CONNECTED then
 		-- TODO: stop all fibers
 		self:_cleanup(0)
-		
+
 		if self._reconnect then
 			self.state = NOTCONNECTED -- was RECONNECTING
-			fiber.create(function(self) fiber.name("net.cb") self:on_disconnect(errno.strerror(e)) end,self)
+			fiber.create(function(cnn) fiber.name("net.cb") cnn:on_disconnect(errno.strerror(e)) end,self)
 			fiber.sleep(0)
 			self:connect()
 		else
 			-- self.state = NOTCONNECTED -- already
-			fiber.create(function(self) fiber.name("net.cb") self:on_disconnect(errno.strerror(e)) end,self)
+			fiber.create(function(cnn) fiber.name("net.cb") cnn:on_disconnect(errno.strerror(e)) end,self)
 		end
 	end
 end
@@ -264,22 +258,22 @@ function M:on_read(is_last)
 end
 
 function M:on_connect_io()
-	local err = self.s:getsockopt('SOL_SOCKET', 'SO_ERROR');
-	if err ~= 0 then
-		-- OLD TODO: error handling
-		self:on_connect_failed( err )
-		return
+	do
+		local err = self.s:getsockopt('SOL_SOCKET', 'SO_ERROR');
+		if err ~= 0 then
+			self:on_connect_failed(err)
+			return
+		end
 	end
 	self.state = CONNECTED;
-	
+
 	local weak = setmetatable({}, { __mode = "kv" })
 	weak.self = self
 	--print('----', weak.self.s)
-	
+
 	self.ww = fiber.create(function (weak, gen)
 		fiber.name(string.format("net.ww[%s:%s#%d]", weak.self.host, weak.self.port, gen), { truncate = true })
 		local s = weak.self.s
-		local timeout = weak.self.timeout
 		while weak.self and gen == weak.self._gen do
 			if s:writable(1) then
 				if not weak.self then break end
@@ -290,58 +284,60 @@ function M:on_connect_io()
 			end
 		end
 	end, weak, self._gen)
-	
+
 	self.rw = fiber.create(function (weak, gen)
 		fiber.name(string.format("net.rw[%s:%s#%d]", weak.self.host, weak.self.port, gen), { truncate = true })
 		local s = weak.self.s
 		local fd = s:fd()
 		local oft = 0ULL
 		local sz  = weak.self.maxbuf
-		while weak.self and gen == self._gen do
+		while weak.self and gen == weak.self._gen do
 			local self = weak.self
 			local rd = C.read(fd, self.rbuf + oft, sz - oft)
 			-- local rd = C.read(s.socket.fd, self.rbuf + oft, 1)
 			if rd >= 0 then
 				self.avail = self.avail + rd;
 				local avail = self.avail
-				
+
 				local status, err = pcall(self.on_read, self, rd == 0)
 				if not status then
 					self:log('E', 'on_read raised an error: ', err)
-					self:on_connect_reset(errno.EINVAL) -- errno.EINVAL = 22
+					return self:on_connect_reset(errno.EINVAL) -- errno.EINVAL = 22
 				end
-				
+
 				local pkoft = avail - self.avail
 				-- print("avail ",avail, " -> ", self.avail, " pkoft = ", pkoft)
-				
+
 				-- FIXME: Is it a good idea?
 				if self.avail > 0 then
 					if self.avail == self.maxbuf then
-						self:on_connect_reset(errno.EMSGSIZE)
-						return
+						return self:on_connect_reset(errno.EMSGSIZE)
 					end
 					oft = self.avail
 					-- print("avail ",avail, " -> ", self.avail, " pkoft = ", pkoft)
 					C.memmove(self.rbuf,self.rbuf + pkoft,oft)
 				else
 					if rd == 0 then
-						self:on_connect_reset(errno.ECONNABORTED)
-						return
+						return self:on_connect_reset(errno.ECONNABORTED)
 					end
 					oft = 0
 				end
 			elseif errno_is_transient[errno()] then
+				self = nil
 				s:readable()
 			else
 				-- print( errno.strerror( errno() ))
-				self:on_connect_reset(s:errno())
-				return
+				return self:on_connect_reset(s:errno())
 			end
 		end
+		if s then
+			log.error("Close stale socket: %s", s)
+			s:close()
+		end
 	end, weak, self._gen)
-	
+
 	while self.connwait:put(true, 0) do end
-	fiber.create(function(self) fiber.name("net.cb") self:on_connected() end,self)
+	fiber.create(function(cnn) fiber.name("net.cb") cnn:on_connected() end,self)
 end
 
 function M:wait_con(timeout)
@@ -349,7 +345,7 @@ function M:wait_con(timeout)
 		return true
 	end
 	-- FIXME move define default timeout in the start of the file
-	if slef.connwait:get(timeout or self.timeout or 10) then
+	if self.connwait:get(timeout or self.timeout or 10) then
 		return
 	else
 		-- FIXME Should we use to kinds of error here? There are two cases: it
@@ -360,46 +356,46 @@ end
 
 function M:connect()
 	assert(type(self) == 'table',"object required")
-	
+
 	if self.state ~= NOTCONNECTED then
 		return (self.state == CONNECTED)
 	end
-	
+
 	-- connect timeout
 	assert(not self.s, "Already have socket")
-		
+
 	self.state = CONNECTING
 	self._gen = self._gen + 1
-	
+
 	local weak = setmetatable({}, { __mode = "kv" })
 	weak.self = self
-		
+
 	fiber.create(function(weak)
 		-- We don't need to check self because fiber is runned without yielding
 		local ai = socket.getaddrinfo( weak.self.host, weak.self.port, weak.self.timeout, {
 			['type'] = 'SOCK_STREAM',
 		} )
-		
+
 		-- But after getaddrinfo we do need to check the link
 		if not weak.self then return end
-		
+
 		if ai and #ai > 0 then
 			--print(dumper(ai))
 		else
 			weak.self:on_connect_failed( errno() == 0 and errno.ENXIO or errno() )
 			return
 		end
-		
+
 		local ainfo = ai[1]
 		local s = socket( ainfo.family, ainfo.type, ainfo.protocol )
 		if not s then
 			weak.self:on_connect_failed( errno() )
 			return
 		end
-		
+
 		s:nonblock(true)
 		s:linger(1,0)
-		
+
 		while true do
 			-- FIXME sysconnect should be not yielding, but we have to dowble check
 			-- for traps from tnt team
@@ -414,17 +410,17 @@ function M:connect()
 				or s:errno() == errno.EWOULDBLOCK
 				then
 					weak.self.s = s
-					
+
 					local wr = s:writable(weak.self.timeout)
-					
+
 					if not weak.self then s:close() return end
-					
+
 					if wr then
 						weak.self:on_connect_io()
 					else
 						weak.self:on_connect_failed( errno.ETIMEDOUT )
 					end
-					
+
 					return
 				elseif s:errno() == errno.EINTR then
 					-- again
@@ -435,15 +431,14 @@ function M:connect()
 				end
 			end
 		end
-		
+
 	end, weak)
 end
 
-function M:_wbuf_realloc( ... )
+function M:_wbuf_realloc()
 	local old = self.wbuf
 	local osz = self.wsize
 	self.wsize = osz * 2
-	local nsz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 	C.memcpy(self.wbuf, old, self.wcur * ffi.sizeof(self.wbuf[0]))
 end
@@ -519,16 +514,16 @@ function M:_writev()
 	end
 	-- iowait ?
 	return false
-	
+
 end
 
 function M:flush()
 	assert(type(self) == 'table', "object required")
-	
+
 	if self.state ~= CONNECTED then
 		error("Not connected")
 	end
-	
+
 	self._flush:put(true, 0)
 end
 
