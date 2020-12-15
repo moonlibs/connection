@@ -324,7 +324,7 @@ function M:on_connect_io()
 				end
 			elseif errno_is_transient[errno()] then
 				self = nil
-				s:readable()
+				s:readable(1)
 			else
 				-- print( errno.strerror( errno() ))
 				return self:on_connect_reset(s:errno())
