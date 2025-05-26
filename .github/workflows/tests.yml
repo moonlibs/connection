@@ -15,6 +15,8 @@ jobs:
     - uses: ./.github/actions/setup-test
       with:
         tarantool-version: ${{matrix.version}}
+    - name: build lib
+      run: tt rocks make connection-dev-1.rockspec
     - name: run tests
       run: .rocks/bin/luatest --no-capture --coverage -v
     - name: rename luacov.stats.out
