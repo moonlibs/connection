@@ -18,7 +18,7 @@ jobs:
     - name: build lib
       run: tt rocks make connection-dev-1.rockspec
     - name: run tests
-      run: .rocks/bin/luatest --no-capture --coverage -v
+      run: .rocks/bin/luatest --no-capture -v
     - name: rename luacov.stats.out
       run: mv luacov.stats.out luacov.stats.out-${{matrix.version}}
     - uses: actions/upload-artifact@master
