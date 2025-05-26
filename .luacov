@@ -1,0 +1,21 @@
+runreport = false
+deletestats = false
+
+exclude = {
+	"%.rocks/",
+	"builtin/",
+	"t/.+%.test",
+}
+
+pathcorrect = {
+	{ "^/source/connection/", "" },
+}
+
+coveralls = {
+	root = "/",
+	debug = true,
+	pathcorrect = {
+			{ "^/home/runner/work/connection/connection/", "" },
+			{ "^/source/connection", "" },
+	},
+}

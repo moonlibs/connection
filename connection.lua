@@ -30,20 +30,49 @@ ffi.cdef [[
 local C = ffi.C
 
 local iovec = ffi.typeof('struct iovec') -- FIXME it is used once!
-local IOVSZ = ffi.sizeof(iovec)
+local IOVSZ = assert(ffi.sizeof(iovec))
 
 local NOTCONNECTED = 0;
 local CONNECTING   = 1;
 local CONNECTED    = 2;
 local RECONNECTING = 3;
 
+---@class connection
+---@field host string remote host
+---@field port number remote port
+---@field timeout number connection and request timeout
+---@field private __id number identifier of object
+---@field private _auto boolean
+---@field private _reconnect number|false?
+---@field private _gen number generation of connection
+---@field state S2S connection state
+---@field maxbuf number read buffer size
+---@field rbuf ffi.cdata* read buffer
+---@field avail number actual data length in buffer
+---@field wsize number write buffer size
+---@field wbuf ffi.cdata* write buffer
+---@field wcur number current write buffer position
+---@field wstash table stash for write buffer
+---@field _flush fiber.channel flush channel
+---@field connwait fiber.channel connection wait channel
+---@field private ww fiber? writer worker fiber
+---@field private rw fiber? read worker
 local M = obj.class({},_NAME)
 
+---@alias S2S
+---| 0 NOTCONNECTED
+---| 1 CONNECTING
+---| 2 CONNECTED
+---| 3 RECONNECTING
 local S2S = {
 	[NOTCONNECTED]  = 'NOTCONNECTED',
 	[CONNECTING]    = 'CONNECTING',
 	[CONNECTED]     = 'CONNECTED',
 	[RECONNECTING]  = 'RECONNECTING',
+	NOTCONNECTED = NOTCONNECTED,
+	CONNECTED = CONNECTED,
+	CONNECTING = CONNECTING,
+	RECONNECTING = RECONNECTING,
 }
 M.S2S = S2S
 
@@ -53,6 +82,12 @@ local errno_is_transient = {
 	[errno.EWOULDBLOCK] = true;
 	[errno.EINTR] = true;
 }
+
+---@class connection.options
+---@field timeout number? connection and request timeout
+---@field autoconnect boolean? should we connect on init?
+---@field reconnect number|false? reconnect timeout, if false then no reconnect
+---@field maxbuf number? read buffer size, default is 2*1024*1024
 
 --[[
 options:
@@ -78,13 +113,16 @@ internal fields:
 	_gen
 
 ]]
+---@param host string remote host
+---@param port number remote port
+---@param opt connection.options?
 function M:_init(host, port, opt)
 	self.host = host;
 	self.port = tonumber(port)
 	opt = opt or {}
-	
+
 	self.timeout = tonumber(opt.timeout) or 1/3
-	
+
 	if opt.reconnect ~= nil then
 		if opt.reconnect then
 			self._reconnect = tonumber(opt.reconnect)
@@ -94,13 +132,13 @@ function M:_init(host, port, opt)
 	else
 		self._reconnect = 1/3
 	end
-	
+
 	if opt.autoconnect ~= nil then
 		self._auto = opt.autoconnect
 	else
 		self._auto = true
 	end
-	
+
 	self.state = NOTCONNECTED
 	self.maxbuf = opt.maxbuf or 2*1024*1024
 	self.rbuf = ffi.cast('char *', ffi.C.calloc(1, self.maxbuf))
@@ -120,16 +158,15 @@ function M:_init(host, port, opt)
 	self._gen = 0
 
 	self.wsize = 32
-	local osz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 
 	self.wcur = 0
 	self.wstash = {}
 
 	self._flush = fiber.channel(0)
-	
+
 	self.connwait = fiber.channel(0)
-	
+
 	if self._auto then
 		self:connect()
 	end
@@ -140,6 +177,9 @@ function M:_init(host, port, opt)
 	]]
 end
 
+---Logs a message on the connection.
+---@param l string log level
+---@param msg string message to log
 function M:log(l,msg,...)
 	msg = tostring(msg)
 	-- FIXME it's a bad pattern. We should always use format
@@ -163,22 +203,31 @@ function M:fdno()
 	end
 end
 
+---Returns a string representation of the connection.
+---@return string
 function M:_stringify()
 	return string.format("cnn(%s:%s : %s:%s : %s)",self:fdno(),self.state,self.host,self.port,self.__id)
 end
 
+---Describes current connection.
+---@return string
 function M:desc()
 	return tostring(self.host) .. ':' .. tostring(self.port) .. '/' .. self:fdno()
 end
 
+---Default callback for connection established.
 function M:on_connected()
 	self:log("D", "called default on_connected")
 end
 
+---Default callback for connection failed.
+---@param e string|box.error error message
 function M:on_disconnect(e)
 	self:log("D", "called default on_disconnect: %s", e)
 end
 
+---Cleans up the connection.
+---@param e integer errno code that triggered action
 function M:_cleanup(e)
 	self.state = NOTCONNECTED
 	if self.ww then if self.ww ~= fiber.self() then pcall(fiber.cancel,self.ww) end self.ww = nil end
@@ -190,7 +239,7 @@ function M:_cleanup(e)
 	self.avail  = 0ULL
 
 	self.lasterror = errno.strerror(e)
-	
+
 	while self.connwait:put(false, 0) do end
 end
 
@@ -240,12 +289,14 @@ function M:on_connect_failed(e)
 	end
 end
 
+---Callback is called when connection is about to reset
+---@param e integer errno code
 function M:on_connect_reset(e)
 	self:log('W',"connection reset:",errno.strerror(e))
 	if self.state == CONNECTED then
 		-- TODO: stop all fibers
 		self:_cleanup(0)
-		
+
 		if self._reconnect then
 			self.state = NOTCONNECTED -- was RECONNECTING
 			fiber.create(function(self) fiber.name("net.cb") self:on_disconnect(errno.strerror(e)) end,self)
@@ -258,11 +309,18 @@ function M:on_connect_reset(e)
 	end
 end
 
+---Callback is called when data is available for reading.
+---
+---if method raises an error, then connection is reset.
+---@param is_last boolean true if this is the last read, false if more data is expected
 function M:on_read(is_last)
 	self:log('D',"on_read (last:",is_last,") ",ffi.string(self.rbuf,self.ravail))
 	self.avail = 0ULL
 end
 
+---Callback is called when socket has been connected.
+---
+---In this method we create two fibers: one for reading and one for writing.
 function M:on_connect_io()
 	local err = self.s:getsockopt('SOL_SOCKET', 'SO_ERROR');
 	if err ~= 0 then
@@ -271,15 +329,14 @@ function M:on_connect_io()
 		return
 	end
 	self.state = CONNECTED;
-	
+
 	local weak = setmetatable({}, { __mode = "kv" })
 	weak.self = self
 	--print('----', weak.self.s)
-	
+
 	self.ww = fiber.create(function (weak, gen)
 		fiber.name(string.format("net.ww[%s:%s#%d]", weak.self.host, weak.self.port, gen))
 		local s = weak.self.s
-		local timeout = weak.self.timeout
 		while weak.self and gen == weak.self._gen do
 			if s:writable(1) then
 				if not weak.self then break end
@@ -290,7 +347,7 @@ function M:on_connect_io()
 			end
 		end
 	end, weak, self._gen)
-	
+
 	self.rw = fiber.create(function (weak, gen)
 		fiber.name(string.format("net.rw[%s:%s#%d]", weak.self.host, weak.self.port, gen))
 		local s = weak.self.s
@@ -304,16 +361,16 @@ function M:on_connect_io()
 			if rd >= 0 then
 				self.avail = self.avail + rd;
 				local avail = self.avail
-				
+
 				local status, err = pcall(self.on_read, self, rd == 0)
 				if not status then
 					self:log('E', 'on_read raised an error: ', err)
 					self:on_connect_reset(errno.EINVAL) -- errno.EINVAL = 22
 				end
-				
+
 				local pkoft = avail - self.avail
 				-- print("avail ",avail, " -> ", self.avail, " pkoft = ", pkoft)
-				
+
 				-- FIXME: Is it a good idea?
 				if self.avail > 0 then
 					if self.avail == self.maxbuf then
@@ -339,7 +396,7 @@ function M:on_connect_io()
 			end
 		end
 	end, weak, self._gen)
-	
+
 	while self.connwait:put(true, 0) do end
 	fiber.create(function(self) fiber.name("net.cb") self:on_connected() end,self)
 end
@@ -349,7 +406,7 @@ function M:wait_con(timeout)
 		return true
 	end
 	-- FIXME move define default timeout in the start of the file
-	if slef.connwait:get(timeout or self.timeout or 10) then
+	if self.connwait:get(timeout or self.timeout or 10) then
 		return
 	else
 		-- FIXME Should we use to kinds of error here? There are two cases: it
@@ -358,48 +415,50 @@ function M:wait_con(timeout)
 	end
 end
 
+---Connects to the remote host and port.
+---@return boolean true if connected, false if not
 function M:connect()
 	assert(type(self) == 'table',"object required")
-	
+
 	if self.state ~= NOTCONNECTED then
 		return (self.state == CONNECTED)
 	end
-	
+
 	-- connect timeout
 	assert(not self.s, "Already have socket")
-		
+
 	self.state = CONNECTING
 	self._gen = self._gen + 1
-	
+
 	local weak = setmetatable({}, { __mode = "kv" })
 	weak.self = self
-		
+
 	fiber.create(function(weak)
 		-- We don't need to check self because fiber is runned without yielding
 		local ai = socket.getaddrinfo( weak.self.host, weak.self.port, weak.self.timeout, {
 			['type'] = 'SOCK_STREAM',
 		} )
-		
+
 		-- But after getaddrinfo we do need to check the link
 		if not weak.self then return end
-		
+
 		if ai and #ai > 0 then
 			--print(dumper(ai))
 		else
 			weak.self:on_connect_failed( errno() == 0 and errno.ENXIO or errno() )
 			return
 		end
-		
+
 		local ainfo = ai[1]
 		local s = socket( ainfo.family, ainfo.type, ainfo.protocol )
 		if not s then
 			weak.self:on_connect_failed( errno() )
 			return
 		end
-		
+
 		s:nonblock(true)
 		s:linger(1,0)
-		
+
 		while true do
 			-- FIXME sysconnect should be not yielding, but we have to dowble check
 			-- for traps from tnt team
@@ -414,17 +473,17 @@ function M:connect()
 				or s:errno() == errno.EWOULDBLOCK
 				then
 					weak.self.s = s
-					
+
 					local wr = s:writable(weak.self.timeout)
-					
+
 					if not weak.self then s:close() return end
-					
+
 					if wr then
 						weak.self:on_connect_io()
 					else
 						weak.self:on_connect_failed( errno.ETIMEDOUT )
 					end
-					
+
 					return
 				elseif s:errno() == errno.EINTR then
 					-- again
@@ -435,19 +494,23 @@ function M:connect()
 				end
 			end
 		end
-		
+
 	end, weak)
 end
 
-function M:_wbuf_realloc( ... )
+function M:_wbuf_realloc()
 	local old = self.wbuf
 	local osz = self.wsize
 	self.wsize = osz * 2
-	local nsz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 	C.memcpy(self.wbuf, old, self.wcur * ffi.sizeof(self.wbuf[0]))
 end
 
+---Pushes data to the write buffer.
+---
+---Does not write into socket, you must call :flush() to write data.
+---@param buf string|ffi.cdata* data to write
+---@param len number? length of data to write, if nil then uses #buf
 function M:push_write( buf, len )
 	if self.state ~= CONNECTED then
 		error("Not connected")
@@ -471,6 +534,8 @@ function M:push_write( buf, len )
 	self.wcur = self.wcur + 1
 end
 
+---Writes data to the socket
+---@return boolean is_drained true if write buffer was left empty, false if not
 function M:_writev()
 	if self.wcur == 0 then
 		return true
@@ -519,16 +584,17 @@ function M:_writev()
 	end
 	-- iowait ?
 	return false
-	
+
 end
 
+---Flushes the write buffer to the socket.
 function M:flush()
 	assert(type(self) == 'table', "object required")
-	
+
 	if self.state ~= CONNECTED then
 		error("Not connected")
 	end
-	
+
 	self._flush:put(true, 0)
 end
 
