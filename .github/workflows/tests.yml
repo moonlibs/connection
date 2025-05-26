@@ -1,0 +1,49 @@
+name: Testing with unit tests
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  run-unit-tests:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        version: ["1.10.15", "2.10.7", "2.11.2", "3.0.1"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: ./.github/actions/setup-test
+      with:
+        tarantool-version: ${{matrix.version}}
+    - name: run tests
+      run: luatest --no-capture --coverage -v
+    - name: rename luacov.stats.out
+      run: mv luacov.stats.out luacov.stats.out-${{matrix.version}}
+    - uses: actions/upload-artifact@master
+      with:
+        name: luacov.stats.out-${{matrix.version}}
+        path: luacov.stats.out-${{matrix.version}}
+
+  run-coverage-report:
+    runs-on: ubuntu-latest
+    needs: ["run-unit-tests"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: ./.github/actions/setup-test
+      with:
+        tarantool-version: '2.11'
+    - name: Download run artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: luacov.stats.out-*
+        merge-multiple: true
+    - name: debug
+      run: ls -la .
+    - name: merge luacov.stats.out
+      run: cat luacov.stats.out-* | >luacov.stats.out tarantool -e 'm={} for k in io.lines() do local vs=io.read():split(" ") vs[#vs]=nil local r = m[k] if r then for i, v in pairs(vs) do r[i]=r[i]+v end else m[k]=vs end end; for k, v in pairs(m) do print(k) print(table.concat(v, " ")) end'
+    - name: prepare coverage report
+      run: .rocks/bin/luacov-console . && .rocks/bin/luacov-console -s
+    - name: publish coveralls report
+      env:
+        COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+      run: .rocks/bin/luacov-coveralls -v

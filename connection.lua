@@ -69,6 +69,10 @@ local S2S = {
 	[CONNECTING]    = 'CONNECTING',
 	[CONNECTED]     = 'CONNECTED',
 	[RECONNECTING]  = 'RECONNECTING',
+	NOTCONNECTED = NOTCONNECTED,
+	CONNECTED = CONNECTED,
+	CONNECTING = CONNECTING,
+	RECONNECTING = RECONNECTING,
 }
 M.S2S = S2S
 
@@ -154,7 +158,6 @@ function M:_init(host, port, opt)
 	self._gen = 0
 
 	self.wsize = 32
-	local osz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 
 	self.wcur = 0
@@ -495,11 +498,10 @@ function M:connect()
 	end, weak)
 end
 
-function M:_wbuf_realloc( ... )
+function M:_wbuf_realloc()
 	local old = self.wbuf
 	local osz = self.wsize
 	self.wsize = osz * 2
-	local nsz = self.wsize
 	self.wbuf = ffi.new('struct iovec[?]', self.wsize)
 	C.memcpy(self.wbuf, old, self.wcur * ffi.sizeof(self.wbuf[0]))
 end
