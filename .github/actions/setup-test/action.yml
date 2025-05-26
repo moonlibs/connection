@@ -13,12 +13,6 @@ runs:
       uses: ./.github/actions/setup-tarantool
       with:
         tarantool-version: ${{ inputs.tarantool-version }}
-    - name: install luacov-coveralls 0.2.3
-      shell: bash
-      run: tt rocks install --server https://luarocks.org luacov-coveralls 0.2.3
-    - name: install luacov-console 1.2.0
-      shell: bash
-      run: tt rocks --server http://moonlibs.github.io/rocks install luacov-console 1.2.0
     - name: install luatest scm-1
       shell: bash
       run: tt rocks install luatest 1.1.0
