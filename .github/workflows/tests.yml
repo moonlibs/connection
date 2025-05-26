@@ -16,7 +16,7 @@ jobs:
       with:
         tarantool-version: ${{matrix.version}}
     - name: run tests
-      run: luatest --no-capture --coverage -v
+      run: .rocks/bin/luatest --no-capture --coverage -v
     - name: rename luacov.stats.out
       run: mv luacov.stats.out luacov.stats.out-${{matrix.version}}
     - uses: actions/upload-artifact@master
